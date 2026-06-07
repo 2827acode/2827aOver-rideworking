@@ -1,0 +1,1135 @@
+// SETS UP STUFF kinda like import*
+
+
+#include "main.h"
+#include "lemlib/api.hpp" // IWYU pragma: keep
+#include "lemlib/asset.hpp"
+#include "lemlib/chassis/chassis.hpp"
+#include "pros/abstract_motor.hpp"
+#include "pros/adi.hpp"
+#include "pros/misc.h"
+#include "pros/motor_group.hpp"
+#include "pros/rotation.hpp"
+#include "pros/rtos.h"
+#include "pros/rtos.hpp"
+#include <cmath>
+#include <cstdio>
+#include <ctime>
+#include <math.h>
+#include "pros/rtos.hpp"
+
+bool runningSequence = false;
+int sequenceStart = 0;
+bool air5ManualOverride = false;
+bool resetTimerStarted = false;
+int resetStartTime = 0;
+bool air5ReleaseTimerActive = false;
+int air5ReleaseTime = 0;
+
+
+// SETS UP MOVEMENT AND MOTOR/MOTORGROUPS, PNEUMATICS, AND AUTON MOVEMENT
+pros::Controller master(pros::E_CONTROLLER_MASTER);
+pros::MotorGroup left_mg({11,-12,-13}, pros::MotorGearset::blue);
+pros::MotorGroup right_mg({-15,19,18}, pros::MotorGearset::blue);
+pros::MotorGroup IntakeAndOuttake({1,-10}, pros::MotorGearset::blue);
+pros::MotorGroup BottomGoalOutake({-1,10}, pros::MotorGearset::blue);
+
+pros::Rotation horizontal_encoder(14);
+
+pros::Rotation vertical_encoder(17);
+
+lemlib::TrackingWheel horizontal_tracking_wheel(&horizontal_encoder, lemlib::Omniwheel::NEW_2, 0);
+lemlib::TrackingWheel vertical_tracking_wheel(&vertical_encoder, lemlib::Omniwheel::NEW_2, 0);
+
+bool matchloader = false; 
+bool descore = false;
+bool pto = false;
+bool middlegoal = false;
+bool lowgoal = false;
+// pros::Distance distance_sensor(17);  
+
+
+
+
+
+pros::ADIDigitalOut air('G', descore);
+pros::ADIDigitalOut air2('B', matchloader);
+pros::ADIDigitalOut air3('A', pto);
+pros::ADIDigitalOut air4('H',middlegoal);
+pros::ADIDigitalOut air5('C', lowgoal);
+pros::Imu imu(2);
+
+lemlib::ExpoDriveCurve throttle_curve(3, // joystick deadband out of 127
+                                     10, // minimum output where drivetrain will move out of 127
+                                     1.019 // expo curve gain
+);
+
+// input curve for steer input during driver control
+lemlib::ExpoDriveCurve steer_curve(3, // joystick deadband out of 127
+                                  10, // minimum output where drivetrain will move out of 127
+                                  1 // expo curve gain
+);
+
+lemlib::Drivetrain drivetrain(&left_mg, // left motor group
+                              &right_mg, // right motor group
+                              11.5, // 10 inch track width
+                              lemlib::Omniwheel::NEW_325, // using new 4" omnis
+                              450, // drivetrain rpm is 360
+                              2 // horizontal drift is 2 (for now)
+);
+
+lemlib::OdomSensors sensors(&vertical_tracking_wheel, // vertical tracking wheel 1, set to null
+                            nullptr, // vertical tracking wheel 2, set to nullptr as we are using IMEs
+                            &horizontal_tracking_wheel, // horizontal tracking wheel 1
+                            nullptr, // horizontal tracking wheel 2, set to nullptr as we don't have a second one
+                            &imu// inertial sensor
+);
+
+// lateral PID controller
+lemlib::ControllerSettings lateral_controller(5.5, // proportional gain (kP)
+                                              0, // integral gain (kI)
+                                              9, // derivative gain (kD)
+                                              3, // anti windup
+                                              1, // small error range, in inches
+                                              100, // small error range timeout, in milliseconds
+                                              3, // large error range, in inches
+                                              500, // large error range timeout, in milliseconds
+                                              127 // maximum acceleration (slew)
+);
+
+// angular PID controller
+lemlib::ControllerSettings angular_controller(4, // proportional gain (kP)
+                                              0, // integral gain (kI)
+                                              30, // derivative gain (kD)
+                                              0, // anti windup
+                                              0, // small error range, in inches
+                                              0, // small error range timeout, in milliseconds
+                                              0, // large error range, in inches
+                                              0, // large error range timeout, in milliseconds
+                                              0 // maximum acceleration (slew)
+);
+
+// create the chassis
+lemlib::Chassis chassis(drivetrain, // drivetrain settings
+                        lateral_controller, // lateral PID settings
+                        angular_controller, // angular PID settings
+                        sensors // odometry sensors
+);
+
+
+/**
+ * A callback function for LLEMU's center button.
+ *
+ * When this callback is fired, it will toggle line 2 of the LCD text between
+ * "I was pressed!" and nothing.
+ */
+void on_center_button() {
+    static bool pressed = false;
+    pressed = !pressed;
+    if (pressed) {
+        pros::lcd::set_text(2, "I was pressed!");
+    } else {
+        pros::lcd::clear_line(2);
+    }
+}
+
+/**
+ * Runs initialization code. This occurs as soon as the program is started.
+ *
+ * All other competition modes are blocked by initialize; it is recommended
+ * to keep execution time for this mode under a few seconds.
+ */
+// initialize function. Runs on program startup
+void initialize() {
+    pros::lcd::initialize(); // initialize brain screen
+    chassis.calibrate(); // calibrate sensors
+    // print position to brain screen
+    pros::Task screen_task([&]() {
+        while (true) {
+            // print robot location to the brain screen
+            pros::lcd::print(0, "X: %f", chassis.getPose().x); // x
+            pros::lcd::print(1, "Y: %f", chassis.getPose().y ); // y
+            pros::lcd::print(2, "Theta: %f",chassis.getPose().theta);// heading
+
+            // delay to save resources
+            pros::delay(50);
+        }
+    });
+}
+
+/**
+ * Runs while the robot is in the disabled state of Field Management System or
+ * the VEX Competition Switch, following either autonomous or opcontrol. When
+ * the robot is enabled, this task will exit.
+ */
+void disabled() {}
+
+/**
+ * Runs after initialize(), and before autonomous when connected to the Field
+ * Management System or the VEX Competition Switch. This is intended for
+ * competition-specific initialization routines, such as an autonomous selector
+ * on the LCD.
+ *
+ * This task will exit when the robot is enabled and autonomous or opcontrol
+ * starts.
+ */
+void competition_initialize() {}
+
+
+
+ASSET(curve_txt);
+
+void autonomous() {
+
+
+
+
+    // left 7 ball
+    // chassis.setPose(0,0,0);
+    // IntakeAndOuttake.move(127);
+    // air3.set_value(false);
+    // pto = false;
+    // air.set_value(false);
+    // descore = false;
+    // chassis.moveToPoint(-15, 22, 500, {.minSpeed = 127}, true);
+    // pros::delay(600);
+    // air2.set_value(true);
+    // matchloader = true;
+    // chassis.turnToHeading(-135, 225);
+    // chassis.moveToPoint(-41, 0, 1500, {.maxSpeed = 127, .minSpeed = 50, .earlyExitRange = 8});
+    // chassis.turnToHeading(-180, 225);
+    // chassis.moveToPoint(-41, -40, 1200, {.maxSpeed = 65, .minSpeed = 65}, false);
+    // chassis.moveToPoint(-41, 40,600, {.forwards = false,  .minSpeed = 127}, false);
+    // air3.set_value(true);
+    // pto = true;
+    // air2.set_value(false);
+    // matchloader = false;
+    // chassis.moveToPoint(-41, 40, 400, {.forwards = false, .maxSpeed = 65, .minSpeed = 65}, false);
+    // pros::delay(850);
+    // chassis.moveToPoint(-41, 9, 400, {.maxSpeed = 127});
+    // chassis.turnToHeading(135, 250);
+    // chassis.moveToPoint(-51.3, 17, 450, {.forwards = false, .maxSpeed = 127});
+    // chassis.turnToHeading(180, 200);
+    // chassis.moveToPoint(-51.3, 35, 1000, {.forwards = false, .maxSpeed = 65, .minSpeed = 45});
+    // chassis.turnToHeading(90, 500, {.maxSpeed = 40, .minSpeed = 30}, false);
+    // chassis.moveToPoint(-51.3, 40, 1000, {.forwards = false, .maxSpeed = 65, .minSpeed = 45});
+    // chassis.turnToHeading(90, 10000, {.maxSpeed = 40, .minSpeed = 30}, false);
+
+
+
+
+    // left 4+3 split
+    // chassis.setPose(0,0,0);
+    // IntakeAndOuttake.move(127);
+    // air3.set_value(false);
+    // pto = false;
+    // air.set_value(false);
+    // descore = false;
+    // chassis.moveToPoint(0, 33, 1000, {.maxSpeed = 127}, true);
+    // pros::delay(400);
+    // air2.set_value(true);
+    // matchloader = true;
+    // chassis.turnToHeading(-90, 350);
+    // chassis.moveToPoint(-20, 33, 900, {.maxSpeed = 50, .minSpeed = 50});
+    // chassis.moveToPose(35, 33, -90, 600, {.forwards = false, .minSpeed = 127}, false);
+    // air3.set_value(true);
+    // pto = true;
+    // air2.set_value(false);
+    // matchloader = false;
+    // chassis.moveToPoint(35, 33, 400, {.forwards = false, .maxSpeed = 45, .minSpeed = 35}, false);
+    // pros::delay(250);
+    // chassis.turnToHeading(-190, 600);
+    // chassis.moveToPoint(27, 6, 500, {.maxSpeed = 75}, true);
+    // pros::delay(300);
+    // air3.set_value(false);
+    // pto = false;
+    // air2.set_value(true);
+    // matchloader = true;
+    // chassis.turnToHeading(-45, 450);
+    // chassis.moveToPose(43.3, -12, -45, 2000, {.forwards = false, .maxSpeed = 85, .minSpeed = 75}, true);
+    // pros::delay(200);
+    // air3.set_value(true);
+    // pto = true;
+    // BottomGoalOutake.move(75);
+    // pros::delay(100);
+    // air3.set_value(false);
+    // pto = false;
+    // air4.set_value(true);
+    // middlegoal = true;
+    // pros::delay(200);
+    // IntakeAndOuttake.move(0);
+    // pros::delay(300);
+    // IntakeAndOuttake.move(65);
+    // pros::delay(2000);
+    // air2.set_value(false);
+    // matchloader = false;
+    // chassis.moveToPoint(15, 20, 1000, {.maxSpeed = 127});
+    // chassis.turnToHeading(90, 500);
+    // chassis.moveToPoint(40, 20, 650, {.maxSpeed = 100, .minSpeed = 65});
+    // chassis.turnToHeading(110, 10000, {.maxSpeed = 40, .minSpeed = 30}, false);
+
+
+
+
+    // solo awp
+    // chassis.setPose(0,0,0);
+    // IntakeAndOuttake.move(127);
+    // air3.set_value(false);
+    // pto = false;
+    // air.set_value(false);
+    // descore = false;
+    // chassis.moveToPoint(0, 3, 1000, {.maxSpeed = 75, .minSpeed = 45});
+    // chassis.moveToPoint(0, -46, 300, {.forwards = false, .maxSpeed = 35});
+    // chassis.moveToPoint(0, -46, 300, {.forwards = false, .maxSpeed = 75});
+    // chassis.moveToPoint(0, -46, 900, {.forwards = false, .maxSpeed = 127}, true);
+    // pros::delay(500);
+    // air2.set_value(true);
+    // matchloader = true;
+    // chassis.turnToHeading(-90, 450);
+    // chassis.moveToPoint(-20, -47, 925, {.maxSpeed = 45, .minSpeed = 45});
+    // chassis.moveToPoint(40, -49, 700, {.forwards = false, .maxSpeed = 100,.minSpeed = 75}, false);
+    // air3.set_value(true);
+    // pto = true;
+    // air2.set_value(false);
+    // matchloader = false;
+    // chassis.moveToPoint(40, -49, 600, {.forwards = false, .maxSpeed = 45, .minSpeed = 35}, false);
+    // pros::delay(300);
+    // air3.set_value(false);
+    // pto = false;
+    // chassis.turnToHeading(10, 500);
+    // chassis.moveToPoint(25, -24, 400, {.maxSpeed = 127}, true);
+    // pros::delay(300);
+    // air2.set_value(true);
+    // matchloader = true;
+    // chassis.turnToHeading(0, 250, {}, false);
+    // air2.set_value(false);
+    // matchloader = false;
+    // chassis.moveToPoint(25, 17, 600, {.maxSpeed = 127, .minSpeed = 127});      
+    // chassis.moveToPoint(25, 17, 300, {.maxSpeed = 127}, true);
+    // pros::delay(300);
+    // air2.set_value(true);
+    // matchloader = true;
+    // chassis.turnToPoint(6, 49.5, 150);
+    // chassis.moveToPoint(6, 49.5, 900, {.maxSpeed = 127});
+    // chassis.turnToHeading(-90, 300);
+    // chassis.moveToPoint(35, 49.5, 500, {.forwards = false, .maxSpeed = 75, .minSpeed = 65}, false);
+    // air3.set_value(true);
+    // pto = true;
+    // chassis.moveToPoint(35, 49.5, 500, {.forwards = false, .maxSpeed = 45, .minSpeed = 35}, true);
+    // pros::delay(550);
+    // air3.set_value(false);
+    // pto = false;
+    // chassis.moveToPoint(-20, 49.5, 550, {.maxSpeed = 85, .minSpeed =85});
+    // chassis.moveToPoint(-40, 49.5, 700, {.maxSpeed = 45, .minSpeed =45});
+    // // chassis.moveToPoint(0, 51,850, {.forwards = false, .maxSpeed = 75});
+    // // chassis.turnToHeading(-45, 350);
+    // // chassis.moveToPoint(40.5, 11,6000, {.forwards = false, .maxSpeed = 100, .minSpeed =85}, true);
+    // chassis.moveToPose(33.1, 15, -45,6000, {.forwards = false, .maxSpeed = 100, .minSpeed =65}, true);
+    // pros::delay(500);
+    // air3.set_value(true);
+    // pto = true;
+    // BottomGoalOutake.move(65);
+    // pros::delay(200);
+    // BottomGoalOutake.move(55);
+    // pros::delay(100);
+    // air3.set_value(false);
+    // pto = false;
+    // air4.set_value(true);
+    // middlegoal = true;
+    // pros::delay(50);
+    // IntakeAndOuttake.move(0);
+    // pros::delay(800);
+    // IntakeAndOuttake.move(85);
+    // chassis.moveToPoint(40.5, 11,6000, {.forwards = false, .maxSpeed = 45, .minSpeed =45}, true);
+    // pros::delay(2000);
+    // chassis.moveToPoint(33.5, 12, 500, {.maxSpeed = 65, .minSpeed = 65}, true);
+    // BottomGoalOutake.move(127);
+    // pros::delay(300);
+    // air4.set_value(false);
+    // middlegoal = false;
+    // chassis.moveToPoint(40.5, 11, 6000, {.forwards = false, .maxSpeed = 45, .minSpeed = 45});
+
+
+
+    // right 7 ball
+    // chassis.setPose(0,0,0);
+    // IntakeAndOuttake.move(127);
+    // air3.set_value(false);
+    // pto = false;
+    // air.set_value(false);
+    // descore = false;
+    // chassis.moveToPoint(16, 23, 650, {.maxSpeed = 127, .minSpeed = 65}, true);
+    // pros::delay(600);
+    // air2.set_value(true);
+    // matchloader = true;
+    // chassis.turnToPoint(40, -3, 225);
+    // chassis.moveToPoint(40, -3, 1500, {.maxSpeed = 127, .minSpeed = 50, .earlyExitRange = 8});
+    // chassis.turnToHeading(-180, 150);
+    // chassis.moveToPoint(40, -40,   900, {.maxSpeed = 65, .minSpeed = 65}, false);
+    // chassis.moveToPose(40, 40,-180,600, {.forwards = false, .minSpeed = 127}, false);
+    // air3.set_value(true);
+    // pto = true;
+    // air2.set_value(false);
+    // matchloader = false;
+    // chassis.moveToPoint(40, 40, 400, {.forwards = false, .maxSpeed = 45, .minSpeed = 35}, false);
+    // pros::delay(850);
+    // chassis.moveToPoint(40, 9, 400, {.maxSpeed = 127});
+    // chassis.turnToHeading(135, 250);
+    // chassis.moveToPoint(32.5, 17, 450, {.forwards = false, .maxSpeed = 127});
+    // chassis.turnToHeading(180, 300);
+    // chassis.moveToPoint(32.5, 35, 1000, {.forwards = false, .maxSpeed = 65, .minSpeed = 45});
+    // chassis.turnToHeading(90, 500, {.maxSpeed = 40, .minSpeed = 30}, false);
+    // chassis.moveToPoint(32.5, 40, 1000, {.forwards = false, .maxSpeed = 65, .minSpeed = 45});
+    // chassis.turnToHeading(90, 10000, {.maxSpeed = 40, .minSpeed = 30}, false);
+
+
+    // right 4+3 split
+    // chassis.setPose(0,0,0);
+    // IntakeAndOuttake.move(127);
+    // air3.set_value(false);
+    // pto = false;
+    // air.set_value(false);
+    // descore = false;
+    // chassis.moveToPoint(0, 31, 1000 , {.maxSpeed = 127}, true);
+    // pros::delay(500);
+    // air2.set_value(true);
+    // matchloader = true;
+    // chassis.turnToHeading(90, 400);
+    // chassis.moveToPoint(40, 32, 900, {.maxSpeed = 45, .minSpeed = 45});
+    // chassis.moveToPose(-40, 32, 90 ,800, {.forwards = false, .minSpeed = 127}, false);
+    // air3.set_value(true);
+    // pto = true;
+    // air2.set_value(false);
+    // matchloader = false;
+    // chassis.moveToPoint(-40, 32, 800, {.forwards = false, .maxSpeed = 65, .minSpeed = 65}, false);
+    // chassis.turnToHeading(200, 750);
+    // chassis.moveToPoint(-30, 6, 750, {}, true);
+    // pros::delay(250);
+    // air2.set_value(true);
+    // matchloader = true;
+    // air3.set_value(false);
+    // pto = false;
+    // chassis.turnToHeading(-135, 250);
+    // air2.set_value(false);
+    // matchloader = false;
+    // chassis.moveToPoint(-41, -6, 500, {.maxSpeed = 85}, false);
+    // air5.set_value(true);
+    // lowgoal = true;
+    // air3.set_value(true);
+    // pto = true;
+    // BottomGoalOutake.move(35);
+    // pros::delay(500);
+    // BottomGoalOutake.move(45);
+    // pros::delay(500);
+    // air5.set_value(false);
+    // lowgoal = false;
+    // chassis.moveToPoint(-21, 22, 950, {.forwards = false, .maxSpeed = 127});
+    // chassis.turnToHeading(90, 500);
+    // chassis.moveToPoint(-40, 22, 1000, {.forwards = false, .maxSpeed = 75,.minSpeed = 65});
+    // chassis.turnToHeading(45, 10000, {.maxSpeed = 45, .minSpeed = 30});
+
+
+
+
+
+
+
+
+
+
+
+
+    
+
+
+    
+
+
+
+
+
+
+
+
+
+    // sowayers right side
+	// air3.set_value(false);
+	// pros::delay(20);
+	// pto = false;
+	// IntakeAndOuttake.move(127);
+    // chassis.setPose(-44.224,-7.577, 180);
+    // chassis.moveToPoint(-44.224, -45.577, 2000, {.maxSpeed = 80});
+    // chassis.turnToHeading(270, 1000);
+    // air2.set_value(true);
+    // pros::delay(20);
+    // matchloader = true;
+    // chassis.moveToPoint(-60, -46.577, 1000, {.maxSpeed = 70});
+
+    // // chassis.moveToPoint(-32.854, -11.056, 350, {.maxSpeed = 64});
+    // // chassis.moveToPoint(-22.19, -22.46, 1000, {.maxSpeed = 64}, true);
+    // // pros::delay(500);
+    // // air2.set_value(true);
+    // // pros::delay(20);
+    // // matchloader = true;
+    // chassis.moveToPoint(0, 30, 1000);
+    // chassis.turnToHeading(180, 1000);
+    // chassis.moveToPoint(0, 0, 1000);
+    
+
+
+
+
+
+
+
+
+    // tuning
+    // chassis.turnToHeading(90, 10000);
+    // chassis.turnToHeading(-180, 10000);
+    // chassis.turnToHeading(0, 1000, {.maxSpeed = 50});
+    // chassis.moveToPoint(0, 48, 10000);
+    // chassis.turnToHeading(90, 100000);
+            // offset tune
+    // chassis.moveToPoint(0, 20, 1000);
+    // chassis.turnToHeading(-90, 500);
+    // chassis.moveToPoint(-20, 20, 1000);
+    // chassis.turnToHeading(180, 500);
+    // chassis.moveToPoint(-20, 0, 1000);
+    // chassis.turnToHeading(90, 500);
+    // chassis.moveToPoint(0, 0, 1000);
+    // chassis.turnToHeading(0, 500);
+
+    // chassis.setPose(0,0,0);
+    // pros:pros::c::delay(13000);
+    // chassis.moveToPoint(0, 2, 1000, {.minSpeed = 30});
+
+
+}
+
+/**
+ * Runs the operator control code. This function will be started in its own task
+ * with the default priority and stack size whenever the robot is enabled via
+ * the Field Management System or the VEX Competition Switch in the operator
+ * control mode.
+ *
+ * If no competition control is connected, this function will run immediately
+ * following initialize().
+ *
+ * If the robot is disabled or communications is lost, the
+ * operator control task will be stopped. Re-enabling the robot will restart the
+ * task, not resume it from where it left off.
+ */
+
+
+// DRIVER CONTROL
+// void opcontrol() {
+//     chassis.setPose(0,0,0);
+
+
+
+//     while (true) {
+
+
+//         // Arcade control scheme
+//         int dir = master.get_analog(ANALOG_LEFT_Y);    // Gets amount forward/backward from left joystick
+//         int turn = master.get_analog(ANALOG_RIGHT_X);  // Gets the turn left/right from right joystick
+//         left_mg.move(dir + turn);                      // Sets left motor voltage
+//         right_mg.move(dir - turn);            
+//                           // Run for 20 ms then update
+
+
+//         // get joystick positions
+//         // int leftY = master.get_analog(pros::E_CONTROLLER_ANALOG_LEFT_Y);
+//         // int rightY = master.get_analog(pros::E_CONTROLLER_ANALOG_RIGHT_Y);
+//         // // move the chassis with tank controls
+//         // chassis.tank(leftY, rightY);
+//         // // delay to save resources
+//         // pros::delay(25);
+
+
+//         if (master.get_digital(DIGITAL_L1)) {
+//             air3.set_value(true);
+//             pros::delay(20);
+//             pto = true;
+//             IntakeAndOuttake.move(127);
+
+
+//         // } if (master.get_digital_new_press(DIGITAL_L2)) {
+//         //     air3.set_value(false);
+//         //     pros::delay(20);
+//         //     pto = false;
+//         //     IntakeAndOuttake.move(127);
+//         //     pros::delay(125);
+//         //     air5.set_value(true);
+//         //     pros::delay(20);
+//         //     lowgoal = true;
+//         //     air3.set_value(true);
+//         //     pros::c::delay(20);
+//         //     pto = true;
+            
+            
+            
+            
+
+//         // } else if (master.get_digital(DIGITAL_L2)) {
+//         //     BottomGoalOutake.move(75);
+
+//          } if (master.get_digital_new_press(DIGITAL_L2)) {
+//             runningSequence = true;
+//             sequenceStart = pros::millis();
+
+//             air3.set_value(false);
+//             pto = false;
+//             IntakeAndOuttake.move(127);
+//                 }
+
+//         if (runningSequence) {
+//             int elapsed = pros::millis() - sequenceStart;
+
+//             if (elapsed > 150) {
+//                 air5.set_value(true);
+//                 lowgoal = true;
+//                 air3.set_value(true);
+//                 pto = true;
+//             }
+
+//             if (elapsed > 165) {
+//                 BottomGoalOutake.move(75);
+//             }
+//             if (elapsed > 465) {
+//                 runningSequence = false;
+//             }
+//         }
+        
+        
+
+//         // continuous control AFTER or DURING hold
+//         if (master.get_digital(DIGITAL_L2)) {
+//             BottomGoalOutake.move(45);
+        
+
+    
+
+//         } else if (master.get_digital(DIGITAL_R1)) {
+//             air3.set_value(false);
+//             pros::delay(20);
+//             pto = false;
+//             IntakeAndOuttake.move(127);
+
+//         } else if (master.get_digital(DIGITAL_R2)) {
+//             air4.set_value(true);
+//             pros::delay(20);
+//             middlegoal = true;
+//             air3.set_value(true);
+//             pros::delay(20);
+//             pto = true;
+//             IntakeAndOuttake.move(65);
+
+//         } else if (master.get_digital_new_press(pros::E_CONTROLLER_DIGITAL_X)) {
+//             if (matchloader == false) {
+//                 air2.set_value(true);
+//                 pros::delay(20);
+//                 matchloader = true;
+//             } else {
+//                 air2.set_value(false);
+//                 pros::delay(20);
+//                 matchloader = false;
+//             }
+
+//         } else if (master.get_digital(pros::E_CONTROLLER_DIGITAL_RIGHT)) {
+//             air3.set_value(false);
+//             pros::delay(20);
+//             pto = false;
+//             air4.set_value(true);
+//             pros::delay(20);
+//             middlegoal = true;
+//             IntakeAndOuttake.move(40);
+            
+
+            
+//         } else if (master.get_digital(pros::E_CONTROLLER_DIGITAL_Y)) {
+//             air.set_value(false);
+//             pros::delay(20);
+//             descore = false;
+//         } else {
+//             // default stop
+//             air.set_value(true);
+//             pros::delay(20);
+//             descore = false;
+//             IntakeAndOuttake.move(0);
+//             air4.set_value(false);
+//             pros::delay(20);
+//             middlegoal = false;
+
+//         }     
+//     }
+// }
+
+// void opcontrol() {
+//     chassis.setPose(0, 0, 0);
+
+//     while (true) {
+
+//         /* =======================
+//            DRIVETRAIN (ARCade)
+//         ======================= */
+//         int dir = master.get_analog(ANALOG_LEFT_Y);
+//         int turn = master.get_analog(ANALOG_RIGHT_X);
+
+//         left_mg.move(dir + turn);
+//         right_mg.move(dir - turn);
+
+
+//         /* =======================
+//            INTAKE + SEQUENCE START
+//         ======================= */
+
+//         // START SEQUENCE (L2 press)
+//         if (master.get_digital_new_press(DIGITAL_L2)) {
+//             runningSequence = true;
+//             sequenceStart = pros::millis();
+
+//             air3.set_value(false);
+//             pto = false;
+//             IntakeAndOuttake.move(127);
+//         }
+
+
+//         /* =======================
+//            RUN SEQUENCE (NON-BLOCKING)
+//         ======================= */
+
+//         if (runningSequence) {
+//             int elapsed = pros::millis() - sequenceStart;
+
+//             if (elapsed > 0) {
+//                 IntakeAndOuttake.move(127);
+//             }
+
+//             if (elapsed > 150) {
+//                 air5.set_value(true);
+//                 lowgoal = true;
+//                 air3.set_value(true);
+//                 pto = true;
+//             }
+
+//             if (elapsed > 165) {
+//                 BottomGoalOutake.move(75);
+//             }
+
+//             if (elapsed > 465) {
+//                 runningSequence = false;
+//             }
+//         }
+
+
+//         /* =======================
+//            MANUAL OVERRIDES
+//         ======================= */
+
+//         // L1 intake override
+//         if (master.get_digital(DIGITAL_L1)) {
+//             air3.set_value(true);
+//             pto = true;
+//             IntakeAndOuttake.move(127);
+//         }
+
+//         // L2 hold (backup control if not sequencing)
+//         else if (master.get_digital(DIGITAL_L2)) {
+//             BottomGoalOutake.move(45);
+//         }
+
+//     bool l2_held = master.get_digital(DIGITAL_L2);
+
+//     // detect release start
+//     if (!l2_held && l2_was_pressed && l2_release_time == 0) {
+//         l2_release_time = pros::millis();
+//     }
+
+//     // reset while holding
+//     if (l2_held) {
+//         l2_was_pressed = true;
+//         l2_release_time = 0;
+//     }
+
+//     // after release delay
+//     if (!l2_held && l2_was_pressed && l2_release_time != 0) {
+//         if (pros::millis() - l2_release_time > 1000) {
+//             air5.set_value(false);
+//             l2_was_pressed = false;
+//             l2_release_time = 0;
+//         }
+//     }
+
+//         // R1 intake reverse / intake mode  
+//         else if (master.get_digital(DIGITAL_R1)) {
+//             air3.set_value(false);
+//             pto = false;
+//             IntakeAndOuttake.move(127);
+//         }
+
+//         // R2 mid goal scoring
+//         else if (master.get_digital(DIGITAL_R2)) {
+//             air4.set_value(true);
+//             middlegoal = true;
+//             air3.set_value(true);
+//             pto = true;
+//             IntakeAndOuttake.move(65);
+//         }
+
+//         // X toggle matchloader
+//         else if (master.get_digital_new_press(DIGITAL_X)) {
+//             matchloader = !matchloader;
+//             air2.set_value(matchloader);
+//         }
+
+
+//         // Y descore
+//         else if (master.get_digital(DIGITAL_Y)) {
+//             air.set_value(false);
+//             descore = false;
+//         }
+
+//         /* =======================
+//            DEFAULT STATE (SAFE)
+//         ======================= */
+//         else {
+//             IntakeAndOuttake.move(0);
+
+//             air4.set_value(false);
+//             middlegoal = false;
+//             air.set_value(true);
+//             descore = true;
+//         }
+
+
+//         /* =======================
+//            LOOP DELAY
+//         ======================= */
+//         pros::delay(20);
+//     }
+// }
+
+
+
+
+
+// working
+// void opcontrol() {
+//     chassis.setPose(0, 0, 0);
+
+//     /* =======================
+//        STATE
+//     ======================= */
+//     bool runningSequence = false;
+//     bool inHoldMode = false;
+
+//     int sequenceStart = 0;
+
+//     bool step2_done = false;
+//     bool step3_done = false;
+//     bool step4_done = false;
+
+//     while (true) {
+
+//         /* =======================
+//            DRIVETRAIN
+//         ======================= */
+//         int dir = master.get_analog(ANALOG_LEFT_Y);
+//         int turn = master.get_analog(ANALOG_RIGHT_X);
+
+//         left_mg.move(dir + turn);
+//         right_mg.move(dir - turn);
+
+
+//         /* =======================
+//            L2 START SEQUENCE
+//         ======================= */
+//         if (master.get_digital_new_press(DIGITAL_L2)) {
+//             runningSequence = true;
+//             inHoldMode = false;
+
+//             sequenceStart = pros::millis();
+
+//             step2_done = false;
+//             step3_done = false;
+//             step4_done = false;
+
+//             // STEP 1
+//             IntakeAndOuttake.move(127);
+//             air3.set_value(false);
+//         }
+
+
+//         /* =======================
+//            TIMED SEQUENCE
+//         ======================= */
+//         if (runningSequence) {
+//             int t = pros::millis() - sequenceStart;
+
+//             // STEP 2
+//             if (t >= 150 && !step2_done) {
+//                 air3.set_value(true);
+//                 air5.set_value(true);
+//                 step2_done = true;
+//             }
+
+//             // STEP 3
+//             if (t >= 175 && !step3_done) {
+//                 BottomGoalOutake.move(75);
+//                 step3_done = true;
+//             }
+
+//             // STEP 4
+//             if (t >= 525 && !step4_done) {
+//                 runningSequence = false;
+//                 inHoldMode = true;
+//                 step4_done = true;
+//             }
+//         }
+
+//         if (!master.get_digital(DIGITAL_L2) && inHoldMode && !air5ReleaseTimerActive) {
+//             IntakeAndOuttake.move(0);
+//             air5ReleaseTimerActive = true;
+//             air5ReleaseTime = pros::millis();
+//         }
+
+//         if (air5ReleaseTimerActive && pros::millis() - air5ReleaseTime >= 1000) {
+//             air5.set_value(false);
+//             air5ReleaseTimerActive = false;
+//         }
+
+//         if (master.get_digital_new_press(DIGITAL_L2)) {
+//             runningSequence = true;
+//             inHoldMode = false;
+//             air5ReleaseTimerActive = false;
+
+//             sequenceStart = pros::millis();
+//         }
+
+
+
+
+
+
+
+//         /* =======================
+//            MANUAL / HOLD CONTROL
+//         ======================= */
+//         if (!runningSequence) {
+
+//             if (master.get_digital(DIGITAL_L1)) {
+//                 air3.set_value(true);
+//                 pto = true;
+//                 IntakeAndOuttake.move(127);
+//                 inHoldMode = false;
+//             }
+
+//             else if (master.get_digital(DIGITAL_R1)) {
+//                 air3.set_value(false);
+//                 pto = false;
+//                 IntakeAndOuttake.move(127);
+//                 inHoldMode = false;
+//             }
+
+//             else if (master.get_digital(DIGITAL_R2)) {
+//                 air4.set_value(true);
+//                 middlegoal = true;
+//                 air3.set_value(false);
+//                 pto = false;
+//                 IntakeAndOuttake.move(65);
+//                 inHoldMode = false;
+//             }
+
+//             else if (master.get_digital_new_press(DIGITAL_X)) {
+//                 matchloader = !matchloader;
+//                 air2.set_value(matchloader);
+
+//                 if (inHoldMode) {
+//                     BottomGoalOutake.move(45);
+//                 } else {
+//                     BottomGoalOutake.move(0);
+//                 }
+//             }
+
+//             else if (master.get_digital(DIGITAL_Y)) {
+//                 air.set_value(false);
+//                 descore = false;
+//                 inHoldMode = false;
+//                 BottomGoalOutake.move(0);
+//             }
+
+//             else {
+//                 air4.set_value(false);
+//                 middlegoal = false;
+
+//                 air.set_value(true);
+//                 descore = true;
+
+//                 if (inHoldMode) {
+
+//                     if (master.get_digital(DIGITAL_L2)) {
+//                         BottomGoalOutake.move(45);
+//                     } else {
+//                         IntakeAndOuttake.move(0);
+//                     }
+//                 } else {
+//                     IntakeAndOuttake.move(0);
+//                     BottomGoalOutake.move(0);
+//                 }
+//             }
+//         }
+
+//         pros::delay(20);
+//     }
+// }
+
+
+void opcontrol() {
+    chassis.cancelAllMotions();
+    chassis.setPose(0, 0, 0);
+
+    bool runningSequence = false;
+    bool inHoldMode = false;
+
+    int sequenceStart = 0;
+    bool step2_done = false;
+    bool step3_done = false;
+    bool step4_done = false;
+
+    bool air5TimerActive = false;
+    int air5TimerStart = 0;
+    bool wasL2Held = false;
+
+    while (true) {
+        int dir = master.get_analog(ANALOG_LEFT_Y);
+        int turn = master.get_analog(ANALOG_RIGHT_X);
+
+        left_mg.move(dir + turn);
+        right_mg.move(dir - turn);
+
+        bool l2Held = master.get_digital(DIGITAL_L2);
+
+        // Start L2 sequence
+        if (master.get_digital_new_press(DIGITAL_L2)) {
+            runningSequence = true;
+            inHoldMode = false;
+
+            sequenceStart = pros::millis();
+            step2_done = false;
+            step3_done = false;
+            step4_done = false;
+
+            air5TimerActive = false;
+
+            IntakeAndOuttake.move(127);
+            air3.set_value(false);
+        }
+
+        // Timed sequence
+        if (runningSequence) {
+            int t = pros::millis() - sequenceStart;
+
+            if (t >= 250 && !step2_done) {
+                air3.set_value(true);
+                air5.set_value(true);
+                step2_done = true;
+            }
+
+            if (t >= 275 && !step3_done) {
+                BottomGoalOutake.move(100);
+                step3_done = true;
+            }
+
+            if (t >= 625 && !step4_done) {
+                runningSequence = false;
+                inHoldMode = true;
+                step4_done = true;
+            }
+        }
+
+        // Hold mode
+        if (inHoldMode && !runningSequence) {
+            BottomGoalOutake.move(45);
+
+            if (l2Held) {
+                BottomGoalOutake.move(65);
+                air5TimerActive = false;
+            } else {
+                IntakeAndOuttake.move(0);
+                air5TimerActive = true;
+
+                if (wasL2Held) {
+                    air5TimerActive = true;
+                    air5TimerStart = pros::millis();
+                }
+            }
+
+            if (air5TimerActive && pros::millis() - air5TimerStart >= 1000) {
+                air5.set_value(false);
+                air5TimerActive = false;
+            }
+        }
+
+        // Manual controls
+        if (!runningSequence) {
+            if (master.get_digital(DIGITAL_L1)) {
+                air5.set_value(false);
+                inHoldMode = false;
+                air5TimerActive = false;
+                air3.set_value(true);
+                pto = true;
+                IntakeAndOuttake.move(127);
+            }
+            else if (master.get_digital(DIGITAL_R1)) {
+                air5.set_value(false);
+                inHoldMode = false;
+                air5TimerActive = false;
+                air3.set_value(false);
+                pto = false;
+                IntakeAndOuttake.move(127);
+            }
+            else if (master.get_digital(DIGITAL_R2)) {
+                air5.set_value(false);
+                inHoldMode = false;
+                air5TimerActive = false;
+                air4.set_value(true);
+                middlegoal = true;
+                air3.set_value(false);
+                pto = false;
+                IntakeAndOuttake.move(85);
+            }
+            else if (master.get_digital_new_press(DIGITAL_X)) {
+                matchloader = !matchloader;
+                air2.set_value(matchloader);
+                air5.set_value(false);
+            }
+            else if (master.get_digital(DIGITAL_Y)) {
+                inHoldMode = false;
+                air5TimerActive = false;
+                air.set_value(false);
+                descore = false;
+                BottomGoalOutake.move(0);
+                air5.set_value(false);
+            }
+            else if (master.get_digital(pros::E_CONTROLLER_DIGITAL_RIGHT)) {
+                air3.set_value(true);
+                pto = true;
+                BottomGoalOutake.move(65);
+                air5.set_value(false);
+            }
+            else if (!inHoldMode) {
+                IntakeAndOuttake.move(0);
+                BottomGoalOutake.move(0);
+                air4.set_value(false);
+                middlegoal = false;
+                air.set_value(true);
+                descore = true;
+            }
+        }
+
+        wasL2Held = l2Held;
+        pros::delay(20);
+    }
+}
+
